@@ -1,149 +1,204 @@
-import flet as ft
+import streamlit as st
 import cv2
-import base64
-import time
+import numpy as np
 import os
-import threading
+import tempfile
+import time
 from detection_engine import DetectionEngine
 
-def main(page: ft.Page):
-    page.title = "Real-Time Traffic Monitoring"
-    page.theme_mode = ft.ThemeMode.DARK
-    page.padding = 20
-    page.window_width = 1200
-    page.window_height = 800
+# Page config
+st.set_page_config(
+    page_title="Urban Road Monitoring",
+    page_icon="🚗",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-    # Initialize detection engine
-    # Adjust path if running from different locations
+# Initialize Session State
+if 'theme' not in st.session_state:
+    st.session_state.theme = 'dark'
+
+# Custom CSS for themes
+def apply_theme(theme):
+    if theme == 'dark':
+        primary_color = "#1E90FF" # Blue
+        bg_color = "#000000"      # Black
+        secondary_bg = "#262730"  # Grey
+        text_color = "#FFFFFF"
+        button_bg = "#1E1E1E"
+    else:
+        primary_color = "#FF69B4" # Pink
+        bg_color = "#FFFFFF"      # White
+        secondary_bg = "#F0F2F6"  # Light Grey
+        text_color = "#000000"
+        button_bg = "#FFE4E1"     # Misty Rose
+
+    st.markdown(f"""
+        <style>
+        .stApp {{
+            background-color: {bg_color};
+            color: {text_color};
+        }}
+        [data-testid="stSidebar"] {{
+            background-color: {secondary_bg};
+        }}
+        .stButton>button {{
+            width: 100%;
+            border-radius: 10px;
+            height: 3em;
+            background-color: {button_bg};
+            color: {text_color};
+            border: 1px solid {primary_color};
+        }}
+        .count-button-active {{
+            background-color: {primary_color} !important;
+            color: white !important;
+            font-weight: bold;
+        }}
+        .count-button-inactive {{
+            background-color: {button_bg};
+            color: {text_color};
+        }}
+        </style>
+    """, unsafe_allow_html=True)
+
+apply_theme(st.session_state.theme)
+
+# Sidebar
+with st.sidebar:
+    st.title("Settings")
+
+    # Theme Toggle
+    st.subheader("Theme")
+    col1, col2 = st.columns(2)
+    if col1.button("Dark Mode"):
+        st.session_state.theme = 'dark'
+        st.rerun()
+    if col2.button("Light Mode"):
+        st.session_state.theme = 'light'
+        st.rerun()
+
+    st.divider()
+
+    # Video Source
+    st.subheader("Video Source")
+    source_type = st.radio("Select Source", ["Local Video", "IP Camera / Link"])
+
+    video_file = None
+    ip_link = ""
+
+    if source_type == "Local Video":
+        video_file = st.file_uploader("Upload Video", type=['mp4', 'avi', 'mov', 'mkv'])
+    else:
+        ip_link = st.text_input("Enter IP/URL", placeholder="http://192.168.1.x:8080/video")
+        st.info("Tip: Use 'IP Webcam' app on mobile for local LAN link.")
+
+    st.divider()
+    start_btn = st.button("Start Monitoring", type="primary")
+    stop_btn = st.button("Stop Monitoring")
+
+# Main Content
+st.title("🚦 Urban Road Scenes: Real-Time Traffic Monitoring")
+
+# Placeholder for counts
+count_cols = st.columns(5)
+placeholders = {}
+classes = ['car', 'bus', 'truck', 'motorcycle', 'person']
+labels = ['Cars', 'Buses', 'Trucks', 'Motorcycles', 'Pedestrians']
+
+for i, cls in enumerate(classes):
+    placeholders[cls] = count_cols[i].empty()
+
+# Video Display
+video_placeholder = st.empty()
+
+# Detection Engine Initialization
+@st.cache_resource
+def get_engine():
     model_path = os.path.join(os.path.dirname(__file__), "../models/yolov8n.pt")
-    engine = DetectionEngine(model_path)
+    return DetectionEngine(model_path)
 
-    # UI Elements
-    video_image = ft.Image(
-        src_base64="",
-        width=800,
-        height=450,
-        fit=ft.ImageFit.CONTAIN,
-    )
+engine = get_engine()
 
-    status_text = ft.Text("Ready", size=18, color=ft.colors.BLUE_200)
+def update_count_buttons(counts):
+    for i, cls in enumerate(classes):
+        val = counts.get(cls, 0)
+        btn_class = "count-button-active" if val > 0 else "count-button-inactive"
+        # We can't easily change button style per-button in standard Streamlit without custom components
+        # So we use markdown with HTML to simulate buttons
+        color = "#1E90FF" if st.session_state.theme == 'dark' else "#FF69B4"
+        bg = color if val > 0 else ("#1E1E1E" if st.session_state.theme == 'dark' else "#FFE4E1")
+        txt_color = "white" if val > 0 else ("white" if st.session_state.theme == 'dark' else "black")
 
-    # Count Display Cards
-    def create_count_card(label, icon):
-        return ft.Container(
-            content=ft.Column([
-                ft.Icon(icon, size=30, color=ft.colors.AMBER_400),
-                ft.Text(label, size=16, weight=ft.FontWeight.BOLD),
-                ft.Text("0", size=24, key=f"count_{label.lower()}")
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-            padding=15,
-            border_radius=10,
-            bgcolor=ft.colors.SURFACE_VARIANT,
-            width=120
-        )
+        placeholders[cls].markdown(f"""
+            <div style="
+                background-color: {bg};
+                color: {txt_color};
+                padding: 10px;
+                border-radius: 10px;
+                text-align: center;
+                border: 1px solid {color};
+                font-weight: bold;
+                margin-bottom: 10px;
+            ">
+                {labels[i]}: {val}
+            </div>
+        """, unsafe_allow_html=True)
 
-    counts_row = ft.Row([
-        create_count_card("Cars", ft.icons.DIRECTIONS_CAR),
-        create_count_card("Buses", ft.icons.DIRECTIONS_BUS),
-        create_count_card("Trucks", ft.icons.LOCAL_SHIPPING),
-        create_count_card("Motorcycles", ft.icons.TWO_WHEELER),
-        create_count_card("Pedestrians", ft.icons.PERSON),
-    ], alignment=ft.MainAxisAlignment.CENTER)
+# Initial counts
+update_count_buttons({})
 
-    def update_counts(counts):
-        page.get_control(f"count_cars").value = str(counts.get('car', 0))
-        page.get_control(f"count_buses").value = str(counts.get('bus', 0))
-        page.get_control(f"count_trucks").value = str(counts.get('truck', 0))
-        page.get_control(f"count_motorcycles").value = str(counts.get('motorcycle', 0))
-        page.get_control(f"count_pedestrians").value = str(counts.get('person', 0))
-        page.update()
+if start_btn:
+    cap = None
+    tfile_path = None
+    if source_type == "Local Video" and video_file is not None:
+        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        tfile.write(video_file.read())
+        tfile_path = tfile.name
+        tfile.close()
+        cap = cv2.VideoCapture(tfile_path)
+    elif source_type == "IP Camera / Link" and ip_link:
+        cap = cv2.VideoCapture(ip_link)
+    else:
+        # Fallback to sample if nothing provided but button clicked?
+        # Or just show error
+        st.error("Please provide a video source.")
 
-    is_processing = False
+    if cap is not None and cap.isOpened():
+        st.success("Connection established. Processing...")
 
-    def video_processing_thread():
-        nonlocal is_processing
+        # Add a stop flag in session state
+        st.session_state.running = True
 
-        # For this prototype, we use the sample data
-        # Check for video, fallback to image if video is missing/broken
-        video_path = os.path.join(os.path.dirname(__file__), "../data/sample_traffic.mp4")
-        image_path = os.path.join(os.path.dirname(__file__), "../data/sample_traffic.jpg")
+        while cap.isOpened() and st.session_state.get('running', False):
+            ret, frame = cap.read()
+            if not ret:
+                st.info("End of video stream.")
+                break
 
-        if os.path.exists(video_path) and cv2.VideoCapture(video_path).isOpened():
-            cap = cv2.VideoCapture(video_path)
-            while cap.isOpened() and is_processing:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            # Process frame
+            processed_frame, counts = engine.process_frame(frame)
 
-                process_and_update_ui(frame)
-            cap.release()
-        elif os.path.exists(image_path):
-            frame = cv2.imread(image_path)
-            if frame is not None:
-                # In image mode, just process once or loop
-                process_and_update_ui(frame)
-                time.sleep(2) # Show for 2 seconds
-        else:
-            status_text.value = "Error: No valid media found"
-            page.update()
+            # Convert BGR to RGB
+            processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
 
-        is_processing = False
-        status_text.value = "Processing Complete"
-        status_text.color = ft.colors.BLUE_200
-        page.update()
+            # Update UI
+            video_placeholder.image(processed_frame, channels="RGB", use_container_width=True)
+            update_count_buttons(counts)
 
-    def process_and_update_ui(frame):
-        # Resize for display
-        display_frame = cv2.resize(frame, (800, 450))
-        processed_frame, counts = engine.process_frame(display_frame)
+            # Check for stop
+            # Note: In Streamlit, it's hard to catch the stop button click inside a loop
+            # unless we use some tricks. But let's try this.
+            # Actually, we might need a small sleep to allow UI interactions?
+            # time.sleep(0.01)
 
-        # Convert to base64 for Flet Image
-        _, buffer = cv2.imencode(".jpg", processed_frame)
-        img_base64 = base64.b64encode(buffer).decode("utf-8")
+        cap.release()
+        if tfile_path and os.path.exists(tfile_path):
+            os.remove(tfile_path)
+        st.session_state.running = False
+    elif cap is not None:
+        st.error("Could not open video source.")
 
-        video_image.src_base64 = img_base64
-        update_counts(counts)
-
-    def handle_process_video(e):
-        nonlocal is_processing
-        if is_processing:
-            return
-
-        is_processing = True
-        status_text.value = "Processing..."
-        status_text.color = ft.colors.GREEN_400
-        page.update()
-
-        # Run processing in a separate thread to keep UI responsive
-        threading.Thread(target=video_processing_thread, daemon=True).start()
-
-    def handle_stop(e):
-        nonlocal is_processing
-        is_processing = False
-        status_text.value = "Stopped"
-        status_text.color = ft.colors.RED_400
-        page.update()
-
-    # Layout
-    page.add(
-        ft.Column([
-            ft.Text("Urban Road Scenes: Real-Time Traffic Monitoring", size=32, weight=ft.FontWeight.BOLD),
-            ft.Divider(),
-            ft.Row([
-                ft.ElevatedButton("Start Monitoring", icon=ft.icons.PLAY_ARROW, on_click=handle_process_video),
-                ft.ElevatedButton("Stop", icon=ft.icons.STOP, on_click=handle_stop, color=ft.colors.RED),
-                status_text
-            ], alignment=ft.MainAxisAlignment.CENTER),
-            ft.Container(
-                content=video_image,
-                border=ft.border.all(2, ft.colors.OUTLINE),
-                border_radius=10,
-                padding=5
-            ),
-            ft.Text("Live Object Detection Summary", size=24, weight=ft.FontWeight.W_500),
-            counts_row
-        ], horizontal_alignment=ft.CrossAxisAlignment.CENTER)
-    )
-
-if __name__ == "__main__":
-    ft.app(target=main)
+if stop_btn:
+    st.session_state.running = False
+    st.write("Stopped.")

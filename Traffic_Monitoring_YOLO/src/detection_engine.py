@@ -61,10 +61,15 @@ class DetectionEngine:
 
 if __name__ == "__main__":
     # Test script
-    engine = DetectionEngine('Traffic_Monitoring_YOLO/models/yolov8n.pt')
-    img = cv2.imread('Traffic_Monitoring_YOLO/data/test_bus.jpg')
+    import os
+    base_dir = os.path.dirname(os.path.dirname(__file__))
+    model_path = os.path.join(base_dir, 'models/yolov8n.pt')
+    img_path = os.path.join(base_dir, 'data/sample_traffic.jpg')
+
+    engine = DetectionEngine(model_path)
+    img = cv2.imread(img_path)
     if img is not None:
         processed_frame, counts = engine.process_frame(img)
-        print(counts)
+        print(f"Detected counts: {counts}")
     else:
-        print("Test image not found")
+        print(f"Test image not found at {img_path}")
